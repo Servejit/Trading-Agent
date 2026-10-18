@@ -1,4 +1,9 @@
+import base64
+import json
+import os
 import sqlite3
+import urllib.error
+import urllib.request
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -53,6 +58,56 @@ def get_previous_close(symbol):
 
 def buy_price_from_close(previous_close):
     return round(float(previous_close) * 1.0199 + 1e-9, 2)
+
+
+def sync_plan_to_github(plan):
+    """Mirror the saved plan to the repository for the scheduled runner."""
+    token = os.environ.get("TRADING_AGENT_GITHUB_TOKEN", "").strip()
+    if not token:
+        return False, "Add the TRADING_AGENT_GITHUB_TOKEN Codespaces secret to enable background plan syncing."
+    api_url = "https://api.github.com/repos/Servejit/Trading-Agent/contents/trade_plan.json"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Northstar-Paper-Trading-App"}
+    try:
+        request = urllib.request.Request(api_url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                existing = json.loads(response.read().decode("utf-8"))
+            sha = existing.get("sha")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                sha = None
+            else:
+                raise
+        payload = {
+            "symbol": str(plan.get("symbol", "")).strip().upper() if plan else "",
+            "buy_price": float(plan.get("buy_price", 0)) if plan else 0,
+            "quantity": int(plan.get("quantity", 0)) if plan else 0,
+            "trade_date": str(plan.get("trade_date", "")) if plan else "",
+            "buy_time": str(plan.get("buy_time", "09:00:00")) if plan else "09:00:00",
+            "sell_time": str(plan.get("sell_time", "09:15:00")) if plan else "09:15:00",
+        }
+        encoded = base64.b64encode((json.dumps(payload, indent=2) + "\\n").encode("utf-8")).decode("ascii")
+        body = {"message": "Sync saved paper-trade plan from Northstar app", "content": encoded}
+        if sha:
+            body["sha"] = sha
+        request = urllib.request.Request(api_url, data=json.dumps(body).encode("utf-8"), headers=headers, method="PUT")
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response.read()
+        return True, "Plan synced to GitHub for the scheduled paper runner."
+    except Exception as exc:
+        return False, f"Plan saved locally, but GitHub sync failed: {exc}"
+
+
+def load_remote_scheduler_state():
+    url = "https://raw.githubusercontent.com/Servejit/Trading-Agent/main/paper_scheduler_state.json"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "Northstar-Paper-Trading-App"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            value = json.loads(response.read().decode("utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
 
 class PaperBroker:
     def __init__(self):
@@ -153,6 +208,8 @@ if save:
         prev=get_previous_close(sym)
         bp=buy_price_from_close(prev)
         broker.save_plan(sym,bp,qty,trade_day,buy_t,sell_t)
+        sync_ok, sync_message = sync_plan_to_github(broker.plan())
+        st.session_state["plan_sync_status"] = {"ok": sync_ok, "message": sync_message}
         st.session_state["plan_calc"]={"symbol":sym.strip().upper(),"close":prev,"buy":bp}
         st.rerun()
     except Exception as e: st.error(f"Could not save plan: {e}")
@@ -167,8 +224,18 @@ if plan:
     p3.metric("Quantity",f"{int(plan['quantity']):,}")
     p4.metric("Illustrative +1% target",money(round(float(plan["buy_price"])*1.01+1e-9,2)))
     st.caption(f"Plan: {plan['trade_date']} · Buy {plan['buy_time']} IST · Sell {plan['sell_time']} IST · Saved {plan['updated_at']}")
-    if st.button("Clear saved plan"): broker.clear_plan(); st.rerun()
+    if st.button("Clear saved plan"):
+        broker.clear_plan()
+        sync_plan_to_github(None)
+        st.rerun()
 else: st.info("No saved plan yet. Fetch the previous close to create one.")
+
+if "plan_sync_status" in st.session_state:
+    sync_status = st.session_state["plan_sync_status"]
+    if sync_status["ok"]:
+        st.success(sync_status["message"])
+    else:
+        st.warning(sync_status["message"])
 st.warning("The saved times are planning details only. This app does not run a background scheduler or automatically place orders.")
 st.divider()
 
@@ -215,6 +282,23 @@ if "closed_summary" in st.session_state:
     else: st.error(f"Paper sell recorded. Gross loss: {money(abs(x['pnl']))} ({x['return_pct']:.2f}%).")
     if st.button("Dismiss result summary"): del st.session_state["closed_summary"]; st.rerun()
 
+st.markdown('<div class="eyebrow">AUTOMATION STATUS</div>', unsafe_allow_html=True)
+remote_state = load_remote_scheduler_state()
+if remote_state.get("symbol") and remote_state.get("status"):
+    status = remote_state.get("status", "UNKNOWN")
+    st.write(f"**Latest scheduled paper run:** {remote_state.get('symbol')} · {status.replace('_', ' ').title()}")
+    if status == "SOLD":
+        pcols = st.columns(4)
+        pcols[0].metric("Scheduled gross P&L", money(remote_state.get("gross_pnl", 0)), f"{float(remote_state.get('return_pct', 0)):.2f}%")
+        pcols[1].metric("Buy fill", money(remote_state.get("buy_fill_price", 0)))
+        pcols[2].metric("Sell fill", money(remote_state.get("sell_fill_price", 0)))
+        pcols[3].metric("Quantity", f"{int(remote_state.get('sell_fill_quantity', 0)):,}")
+        st.caption(remote_state.get("message", "Paper sell completed."))
+    else:
+        st.caption(remote_state.get("message", "The scheduled runner has not completed a trade yet."))
+else:
+    st.caption("No scheduled trade result yet. The runner checks the shared plan on its next scheduled run.")
+
 st.divider()
 st.markdown('<div class="eyebrow">03 · PERFORMANCE</div>',unsafe_allow_html=True)
 st.header("Trade journal")
@@ -237,7 +321,7 @@ with st.expander("About this app & important limitations"):
 - **No indicators or signals:** plan-first workflow with manual simulated fills.
 - **Price source:** Yahoo Finance; prices may be delayed, missing, or differ from broker execution prices.
 - **P&L:** (sell price − buy price) × quantity; excludes fees and taxes.
-- **Automation:** saved buy/sell times do not execute orders. A reliable scheduler and persistent storage are still required for unattended operation.
+- **Automation:** GitHub Actions checks the shared plan on a schedule and records simulated fills. Scheduled runs can be delayed or skipped; this is not a guarantee of execution at the exact minute. The app needs the TRADING_AGENT_GITHUB_TOKEN Codespaces secret to sync plans to the repository.
 - **Storage:** the trade journal is in local SQLite. Some free hosts reset local files, so download backups regularly.
 """)
 st.caption("NORTHSTAR PAPER TRADING STUDIO · Designed for clarity, not financial advice.")
