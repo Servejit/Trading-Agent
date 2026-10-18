@@ -87,7 +87,7 @@ def sync_plan_to_github(plan):
             "buy_time": str(plan.get("buy_time", "09:00:00")) if plan else "09:00:00",
             "sell_time": str(plan.get("sell_time", "09:15:00")) if plan else "09:15:00",
         }
-        encoded = base64.b64encode((json.dumps(payload, indent=2) + "\\n").encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode((json.dumps(payload, indent=2) + "\n").encode("utf-8")).decode("ascii")
         body = {"message": "Sync saved paper-trade plan from Northstar app", "content": encoded}
         if sha:
             body["sha"] = sha
