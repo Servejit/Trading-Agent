@@ -467,10 +467,28 @@ if "scan_df" in st.session_state:
             f"shares at ₹{position['entry_price']:.2f}"
         )
         if st.button("Close paper position at latest close"):
+            exit_price = float(last["close"])
+            entry_price = float(position["entry_price"])
+            filled_quantity = int(position["quantity"])
+            side_multiplier = 1 if position["side"] == "BUY" else -1
+            gross_pnl = (exit_price - entry_price) * filled_quantity * side_multiplier
+            invested_value = entry_price * filled_quantity
+            exit_value = exit_price * filled_quantity
+            return_pct = (gross_pnl / invested_value * 100) if invested_value else 0.0
             broker.close_position(
-                shown_symbol, float(last["close"]), "Manual paper close"
+                shown_symbol, exit_price, "Manual paper close"
             )
-            st.success("Paper position closed.")
+            st.session_state["last_closed_trade_summary"] = {
+                "symbol": shown_symbol,
+                "side": position["side"],
+                "quantity": filled_quantity,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "invested_value": invested_value,
+                "exit_value": exit_value,
+                "pnl": gross_pnl,
+                "return_pct": return_pct,
+            }
             st.rerun()
     elif signal in ("BUY", "SELL") and qty > 0:
         if st.button(f"Execute {signal} in paper account", type="primary"):
@@ -482,6 +500,26 @@ if "scan_df" in st.session_state:
             st.rerun()
     else:
         st.info("No actionable signal or quantity is zero. No order has been placed.")
+
+if "last_closed_trade_summary" in st.session_state:
+    closed = st.session_state["last_closed_trade_summary"]
+    st.write("### ✅ Last successful paper sell — profit details")
+    st.caption("Gross paper-trade result before brokerage, taxes, slippage, and other charges.")
+    profit_col1, profit_col2, profit_col3, profit_col4 = st.columns(4)
+    profit_col1.metric("Realized P&L", f"₹{closed['pnl']:,.2f}", f"{closed['return_pct']:.2f}%")
+    profit_col2.metric("Stock / side", f"{closed['symbol']} / {closed['side']}")
+    profit_col3.metric("Quantity sold", f"{closed['quantity']:,}")
+    profit_col4.metric("Buy → sell price", f"₹{closed['entry_price']:,.2f} → ₹{closed['exit_price']:,.2f}")
+    value_col1, value_col2 = st.columns(2)
+    value_col1.metric("Buy value", f"₹{closed['invested_value']:,.2f}")
+    value_col2.metric("Sell value", f"₹{closed['exit_value']:,.2f}")
+    if closed["pnl"] >= 0:
+        st.success(f"Paper sell completed. Gross profit: ₹{closed['pnl']:,.2f} ({closed['return_pct']:.2f}%).")
+    else:
+        st.error(f"Paper sell completed. Gross loss: ₹{abs(closed['pnl']):,.2f} ({closed['return_pct']:.2f}%).")
+    if st.button("Dismiss profit summary"):
+        del st.session_state["last_closed_trade_summary"]
+        st.rerun()
 
 st.write("### Paper trading history")
 history = broker.history()
