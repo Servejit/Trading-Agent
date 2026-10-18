@@ -50,6 +50,31 @@ def load_yfinance_data(symbol, interval="5m", period="5d"):
     return normalize_columns(raw)
 
 
+
+def get_previous_close(symbol: str) -> float:
+    """Return the latest available completed daily close for an NSE symbol."""
+    import yfinance as yf
+
+    clean_symbol = str(symbol).strip().upper()
+    if not clean_symbol:
+        raise ValueError("Enter an NSE stock symbol.")
+    ticker = clean_symbol if "." in clean_symbol else f"{clean_symbol}.NS"
+    hist = yf.Ticker(ticker).history(period="10d", interval="1d", auto_adjust=False)
+    if hist.empty or "Close" not in hist.columns:
+        raise ValueError(
+            f"Could not fetch the previous close for {clean_symbol}. "
+            "Check the NSE symbol or try again when market data is available."
+        )
+    closes = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+    if closes.empty or float(closes.iloc[-1]) <= 0:
+        raise ValueError(f"No valid previous closing price found for {clean_symbol}.")
+    return float(closes.iloc[-1])
+
+
+def calculate_planned_buy_price(previous_close: float) -> float:
+    """Add 1.99% to the previous close and round to paise."""
+    return round(float(previous_close) * 1.0199 + 1e-9, 2)
+
 def load_demo_data():
     rng = np.random.default_rng(7)
     n = 180
@@ -264,7 +289,6 @@ st.info(
 broker = PaperBroker()
 
 # Saved overnight plan is stored in the same SQLite database as paper trades.
-# It survives ordinary app reruns/reopens while this host preserves paper_trades.db.
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -272,23 +296,20 @@ IST = ZoneInfo("Asia/Kolkata")
 saved_plan = broker.get_saved_plan()
 
 st.write("### 🌙 Overnight paper-trade plan")
-st.caption("Save your stock details in the evening and reopen this app in the morning to see them again. Paper trading only; saving a plan does not place or schedule an order.")
+st.caption(
+    "Enter the NSE stock symbol and quantity. The app fetches the latest available "
+    "completed daily close and calculates the planned buy price as previous close + 1.99%. "
+    "This saves a paper plan only; it does not schedule or send orders."
+)
 with st.form("overnight_plan_form"):
-    plan_col1, plan_col2, plan_col3 = st.columns(3)
+    plan_col1, plan_col2 = st.columns(2)
     plan_symbol = plan_col1.text_input(
-        "NSE symbol",
-        value=(saved_plan["symbol"] if saved_plan else "RELIANCE"),
+        "NSE stock symbol",
+        value=(saved_plan["symbol"] if saved_plan else ""),
+        placeholder="e.g. RELIANCE",
         key="overnight_symbol",
     ).strip().upper()
-    plan_buy_price = plan_col2.number_input(
-        "Planned buy price (₹)",
-        min_value=0.05,
-        value=float(saved_plan["buy_price"]) if saved_plan else 100.0,
-        step=0.05,
-        format="%.2f",
-        key="overnight_buy_price",
-    )
-    plan_quantity = plan_col3.number_input(
+    plan_quantity = plan_col2.number_input(
         "Quantity (shares)",
         min_value=1,
         value=int(saved_plan["quantity"]) if saved_plan else 1,
@@ -306,16 +327,28 @@ with st.form("overnight_plan_form"):
     plan_buy_time = plan_time_col1.time_input("Simulated buy time (IST)", value=saved_buy_time, key="overnight_buy_time")
     plan_sell_time = plan_time_col2.time_input("Simulated sell time (IST)", value=saved_sell_time, key="overnight_sell_time")
     plan_buttons = st.columns(2)
-    save_plan_clicked = plan_buttons[0].form_submit_button("Save plan for morning", type="primary", use_container_width=True)
+    save_plan_clicked = plan_buttons[0].form_submit_button("Fetch close & save plan", type="primary", use_container_width=True)
     clear_plan_clicked = plan_buttons[1].form_submit_button("Clear saved plan", use_container_width=True)
 
 if save_plan_clicked:
     try:
-        broker.save_plan(plan_symbol, plan_buy_price, plan_quantity, plan_date, plan_buy_time, plan_sell_time)
-        st.success("Paper-trading plan saved. Reopen the app in the morning to retrieve it.")
+        if not plan_symbol:
+            raise ValueError("Enter an NSE stock symbol.")
+        if plan_sell_time <= plan_buy_time:
+            raise ValueError("Sell time must be later than buy time.")
+        previous_close = get_previous_close(plan_symbol)
+        calculated_buy_price = calculate_planned_buy_price(previous_close)
+        broker.save_plan(
+            plan_symbol, calculated_buy_price, plan_quantity,
+            plan_date, plan_buy_time, plan_sell_time
+        )
+        st.success(
+            f"Saved paper plan for {plan_symbol}. Previous close: ₹{previous_close:.2f}; "
+            f"planned buy price (+1.99%): ₹{calculated_buy_price:.2f}."
+        )
         st.rerun()
     except Exception as exc:
-        st.error(f"Could not save plan: {exc}")
+        st.error(f"Could not fetch price or save plan: {exc}")
 
 if clear_plan_clicked:
     broker.delete_saved_plan()
@@ -324,19 +357,27 @@ if clear_plan_clicked:
 
 saved_plan = broker.get_saved_plan()
 if saved_plan:
-    target_price = round(float(saved_plan["buy_price"]) * 1.01, 2)
+    calculated_buy = float(saved_plan["buy_price"])
+    target_price = round(calculated_buy * 1.01 + 1e-9, 2)
+    previous_close_estimate = round(calculated_buy / 1.0199, 2)
     plan_summary = pd.DataFrame([{
         "Symbol": saved_plan["symbol"],
-        "Planned buy price (₹)": saved_plan["buy_price"],
+        "Previous close (₹)": previous_close_estimate,
+        "Planned buy (+1.99%) (₹)": calculated_buy,
         "Quantity": saved_plan["quantity"],
-        "Illustrative +1% target (₹)": target_price,
+        "Illustrative +1% sell target (₹)": target_price,
         "Trade date": saved_plan["trade_date"],
         "Buy time (IST)": saved_plan["buy_time"],
         "Sell time (IST)": saved_plan["sell_time"],
         "Last saved": saved_plan["updated_at"],
     }])
     st.dataframe(plan_summary, hide_index=True, use_container_width=True)
-    st.warning("This is a saved plan, not an active scheduler. The target shown uses your planned buy price; if a simulated fill differs, the target should be recalculated from that fill. No orders are automatically placed.")
+    st.warning(
+        "The previous close shown is reconstructed from the saved buy price and may differ "
+        "by a few paise because of rounding. The market-data close is fetched when you save "
+        "the plan, not refreshed automatically at execution time. This is still a saved paper "
+        "plan, not an active scheduler; no orders are automatically placed."
+    )
 
 with st.sidebar:
     st.header("Trading settings")
