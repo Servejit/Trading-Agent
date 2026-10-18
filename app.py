@@ -153,6 +153,18 @@ class PaperBroker:
                     closed_at TEXT
                 )
             """)
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS saved_paper_plan (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    symbol TEXT NOT NULL,
+                    buy_price REAL NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    buy_time TEXT NOT NULL,
+                    sell_time TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
     def open_position(self, symbol, side, quantity, entry_price, stop_loss):
         side = side.upper()
@@ -200,6 +212,41 @@ class PaperBroker:
                 "SELECT * FROM trades ORDER BY id DESC", con
             )
 
+    def save_plan(self, symbol, buy_price, quantity, trade_date, buy_time, sell_time):
+        symbol = str(symbol).strip().upper()
+        buy_price = float(buy_price)
+        quantity = int(quantity)
+        if not symbol:
+            raise ValueError("Enter a stock symbol.")
+        if buy_price <= 0 or quantity <= 0:
+            raise ValueError("Buy price and quantity must be positive.")
+        if sell_time <= buy_time:
+            raise ValueError("Sell time must be later than buy time.")
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("""
+                INSERT INTO saved_paper_plan
+                    (id, symbol, buy_price, quantity, trade_date, buy_time, sell_time, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    symbol=excluded.symbol,
+                    buy_price=excluded.buy_price,
+                    quantity=excluded.quantity,
+                    trade_date=excluded.trade_date,
+                    buy_time=excluded.buy_time,
+                    sell_time=excluded.sell_time,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (symbol, buy_price, quantity, str(trade_date), str(buy_time), str(sell_time)))
+
+    def get_saved_plan(self):
+        with sqlite3.connect(self.db_path) as con:
+            con.row_factory = sqlite3.Row
+            row = con.execute("SELECT * FROM saved_paper_plan WHERE id=1").fetchone()
+            return dict(row) if row else None
+
+    def delete_saved_plan(self):
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("DELETE FROM saved_paper_plan WHERE id=1")
+
 
 # ------------------------- Streamlit interface -------------------------
 st.set_page_config(
@@ -208,13 +255,88 @@ st.set_page_config(
     layout="wide",
 )
 st.title("📈 Indian Intraday Trading Agent")
-st.caption("Paper trading only • Rule-based signals • No real-money orders")
+st.caption("Paper trading only • Saved overnight plans • Rule-based signals • No real-money orders")
 st.info(
     "This app is for educational paper trading. Yahoo Finance data is best-effort "
     "and may be delayed, incomplete, or unavailable. No live broker orders are sent."
 )
 
 broker = PaperBroker()
+
+# Saved overnight plan is stored in the same SQLite database as paper trades.
+# It survives ordinary app reruns/reopens while this host preserves paper_trades.db.
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+saved_plan = broker.get_saved_plan()
+
+st.write("### 🌙 Overnight paper-trade plan")
+st.caption("Save your stock details in the evening and reopen this app in the morning to see them again. Paper trading only; saving a plan does not place or schedule an order.")
+with st.form("overnight_plan_form"):
+    plan_col1, plan_col2, plan_col3 = st.columns(3)
+    plan_symbol = plan_col1.text_input(
+        "NSE symbol",
+        value=(saved_plan["symbol"] if saved_plan else "RELIANCE"),
+        key="overnight_symbol",
+    ).strip().upper()
+    plan_buy_price = plan_col2.number_input(
+        "Planned buy price (₹)",
+        min_value=0.05,
+        value=float(saved_plan["buy_price"]) if saved_plan else 100.0,
+        step=0.05,
+        format="%.2f",
+        key="overnight_buy_price",
+    )
+    plan_quantity = plan_col3.number_input(
+        "Quantity (shares)",
+        min_value=1,
+        value=int(saved_plan["quantity"]) if saved_plan else 1,
+        step=1,
+        key="overnight_quantity",
+    )
+    default_date = (
+        date.fromisoformat(saved_plan["trade_date"])
+        if saved_plan else (datetime.now(IST).date() + timedelta(days=1))
+    )
+    plan_date = st.date_input("Planned trading date", value=default_date, key="overnight_date")
+    plan_time_col1, plan_time_col2 = st.columns(2)
+    saved_buy_time = time.fromisoformat(saved_plan["buy_time"]) if saved_plan else time(9, 0)
+    saved_sell_time = time.fromisoformat(saved_plan["sell_time"]) if saved_plan else time(9, 15)
+    plan_buy_time = plan_time_col1.time_input("Simulated buy time (IST)", value=saved_buy_time, key="overnight_buy_time")
+    plan_sell_time = plan_time_col2.time_input("Simulated sell time (IST)", value=saved_sell_time, key="overnight_sell_time")
+    plan_buttons = st.columns(2)
+    save_plan_clicked = plan_buttons[0].form_submit_button("Save plan for morning", type="primary", use_container_width=True)
+    clear_plan_clicked = plan_buttons[1].form_submit_button("Clear saved plan", use_container_width=True)
+
+if save_plan_clicked:
+    try:
+        broker.save_plan(plan_symbol, plan_buy_price, plan_quantity, plan_date, plan_buy_time, plan_sell_time)
+        st.success("Paper-trading plan saved. Reopen the app in the morning to retrieve it.")
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Could not save plan: {exc}")
+
+if clear_plan_clicked:
+    broker.delete_saved_plan()
+    st.success("Saved paper-trading plan cleared.")
+    st.rerun()
+
+saved_plan = broker.get_saved_plan()
+if saved_plan:
+    target_price = round(float(saved_plan["buy_price"]) * 1.01, 2)
+    plan_summary = pd.DataFrame([{
+        "Symbol": saved_plan["symbol"],
+        "Planned buy price (₹)": saved_plan["buy_price"],
+        "Quantity": saved_plan["quantity"],
+        "Illustrative +1% target (₹)": target_price,
+        "Trade date": saved_plan["trade_date"],
+        "Buy time (IST)": saved_plan["buy_time"],
+        "Sell time (IST)": saved_plan["sell_time"],
+        "Last saved": saved_plan["updated_at"],
+    }])
+    st.dataframe(plan_summary, hide_index=True, use_container_width=True)
+    st.warning("This is a saved plan, not an active scheduler. The target shown uses your planned buy price; if a simulated fill differs, the target should be recalculated from that fill. No orders are automatically placed.")
 
 with st.sidebar:
     st.header("Trading settings")
@@ -342,5 +464,5 @@ st.markdown(
     "official broker APIs, secret storage, explicit opt-in, order validation, "
     "duplicate-order protection, and an emergency kill switch. Free hosting and "
     "free market data are not guaranteed to support unattended intraday execution. "
-    "On free hosting, local SQLite paper-trade history may reset when the app restarts."
+    "The saved plan and paper-trade history live in local SQLite. They persist only while the host preserves the paper_trades.db file; some free hosts can reset local files, so download/keep a backup if the host is ephemeral. Saved plans do not auto-execute."
 )
