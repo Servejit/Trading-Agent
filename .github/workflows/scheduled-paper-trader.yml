@@ -31,7 +31,7 @@ jobs:
           cache: "pip"
 
       - name: Install scheduler dependencies
-        run: python -m pip install --upgrade pip pandas yfinance
+        run: python -m pip install --upgrade pip pandas yfinance cryptography
 
       - name: Run due paper-trade action
         env:
