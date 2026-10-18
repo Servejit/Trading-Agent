@@ -88,6 +88,10 @@ def main():
     status = state.get("status")
     current_time = now.time().replace(tzinfo=None)
 
+    if status in ("SOLD", "BUY_NOT_FILLED"):
+        print(f"Plan already finished with state {status}.")
+        return
+
     if status == "WAITING_FOR_BUY" and current_time >= buy_time:
         if current_time >= sell_time:
             state["status"] = "BUY_NOT_FILLED"
@@ -99,25 +103,27 @@ def main():
 
         quote = current_quote(symbol)
         if quote is None:
-            state["message"] = "No current quote available; buy will be retried on the next scheduled run."
-        elif quote <= limit_price:
-            state.update({
-                "status": "BOUGHT", "buy_fill_price": round(quote, 2),
-                "buy_fill_quantity": qty, "buy_filled_at_ist": now.isoformat(),
-                "message": "Simulated buy filled at the latest available quote."
-            })
-            state["events"].append({
-                "event": "BUY_FILLED", "price": round(quote, 2), "quantity": qty,
-                "time_ist": now.isoformat()
-            })
-        else:
-            state["message"] = (
+            print("No current quote available; will retry on the next scheduled run.")
+            return
+        if quote > limit_price:
+            print(
                 f"Buy not filled: latest quote ₹{quote:.2f} is above the "
                 f"₹{limit_price:.2f} buy limit; will retry until sell time."
             )
+            return
+
+        state.update({
+            "status": "BOUGHT", "buy_fill_price": round(quote, 2),
+            "buy_fill_quantity": qty, "buy_filled_at_ist": now.isoformat(),
+            "message": "Simulated buy filled at the latest available quote."
+        })
+        state["events"].append({
+            "event": "BUY_FILLED", "price": round(quote, 2), "quantity": qty,
+            "time_ist": now.isoformat()
+        })
         state["updated_at_ist"] = now.isoformat()
         write_json(STATE_FILE, state)
-        print(state.get("message", "Buy check completed."))
+        print(state["message"])
         return
 
     if status == "BOUGHT" and current_time >= sell_time:
@@ -149,8 +155,6 @@ def main():
         print(state["message"])
         return
 
-    state["updated_at_ist"] = now.isoformat()
-    write_json(STATE_FILE, state)
     print(f"Nothing due now. Current state: {state.get('status', 'UNKNOWN')}")
 
 
