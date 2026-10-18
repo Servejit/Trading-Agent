@@ -359,10 +359,8 @@ saved_plan = broker.get_saved_plan()
 if saved_plan:
     calculated_buy = float(saved_plan["buy_price"])
     target_price = round(calculated_buy * 1.01 + 1e-9, 2)
-    previous_close_estimate = round(calculated_buy / 1.0199, 2)
     plan_summary = pd.DataFrame([{
         "Symbol": saved_plan["symbol"],
-        "Previous close (₹)": previous_close_estimate,
         "Planned buy (+1.99%) (₹)": calculated_buy,
         "Quantity": saved_plan["quantity"],
         "Illustrative +1% sell target (₹)": target_price,
@@ -373,10 +371,9 @@ if saved_plan:
     }])
     st.dataframe(plan_summary, hide_index=True, use_container_width=True)
     st.warning(
-        "The previous close shown is reconstructed from the saved buy price and may differ "
-        "by a few paise because of rounding. The market-data close is fetched when you save "
-        "the plan, not refreshed automatically at execution time. This is still a saved paper "
-        "plan, not an active scheduler; no orders are automatically placed."
+        "The previous close is fetched when you save the plan; the planned buy price is not "
+        "automatically refreshed later. This is still a saved paper plan, not an active scheduler; "
+        "no orders are automatically placed."
     )
 
 with st.sidebar:
