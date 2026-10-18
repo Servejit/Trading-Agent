@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
+from cryptography.fernet import Fernet
 
 ROOT = Path(__file__).resolve().parent
 PLAN_FILE = ROOT / "trade_plan.json"
@@ -16,13 +17,24 @@ IST = ZoneInfo("Asia/Kolkata")
 
 def read_json(path, default):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and value.get("encrypted"):
+            key = os.environ.get("TRADING_AGENT_ENCRYPTION_KEY", "").strip()
+            if not key:
+                raise RuntimeError("TRADING_AGENT_ENCRYPTION_KEY is not configured.")
+            return json.loads(Fernet(key.encode("utf-8")).decrypt(value["encrypted"].encode("ascii")).decode("utf-8"))
+        return value
     except (OSError, json.JSONDecodeError):
         return default
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    key = os.environ.get("TRADING_AGENT_ENCRYPTION_KEY", "").strip()
+    if not key:
+        raise RuntimeError("TRADING_AGENT_ENCRYPTION_KEY is not configured; refusing to write unencrypted state.")
+    encrypted = Fernet(key.encode("utf-8")).encrypt(json.dumps(value, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    wrapper = {"encrypted": encrypted}
+    path.write_text(json.dumps(wrapper, indent=2) + "\n", encoding="utf-8")
 
 
 def current_quote(symbol):
