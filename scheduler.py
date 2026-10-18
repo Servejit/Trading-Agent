@@ -129,10 +129,7 @@ def main():
     if status == "BOUGHT" and current_time >= sell_time:
         quote = current_quote(symbol)
         if quote is None:
-            state["message"] = "Buy succeeded but no sell quote is available; sell will be retried."
-            state["updated_at_ist"] = now.isoformat()
-            write_json(STATE_FILE, state)
-            print(state["message"])
+            print("Buy succeeded but no sell quote is available; sell will be retried.")
             return
         entry = float(state["buy_fill_price"])
         filled_qty = int(state["buy_fill_quantity"])
