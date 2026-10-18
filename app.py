@@ -50,9 +50,14 @@ def get_previous_close(symbol):
     hist = yf.Ticker(ticker).history(period="15d", interval="1d", auto_adjust=False)
     if hist.empty or "Close" not in hist:
         raise ValueError("No price data found. Check the NSE symbol and try again.")
-    today = datetime.now(IST).date()
+    now_ist = datetime.now(IST)
+    today = now_ist.date()
     data = pd.DataFrame({"day": pd.to_datetime(hist.index).date, "close": pd.to_numeric(hist["Close"], errors="coerce").values})
-    data = data[(data.day < today) & data.close.notna() & (data.close > 0)]
+    # After the NSE cash-market close, today's completed close is the previous close for the next session.
+    if now_ist.time() >= time(15, 30):
+        data = data[(data.day <= today) & data.close.notna() & (data.close > 0)]
+    else:
+        data = data[(data.day < today) & data.close.notna() & (data.close > 0)]
     if data.empty:
         raise ValueError("No completed daily close before today was found.")
     return float(data.iloc[-1].close)
@@ -105,11 +110,21 @@ def sync_plan_to_github(plan):
 
 
 def load_remote_scheduler_state():
-    url = "https://raw.githubusercontent.com/Servejit/Trading-Agent/main/paper_scheduler_state.json"
+    token = os.environ.get("TRADING_AGENT_GITHUB_TOKEN", "").strip()
+    api_url = "https://api.github.com/repos/Servejit/Trading-Agent/contents/paper_scheduler_state.json"
+    raw_url = "https://raw.githubusercontent.com/Servejit/Trading-Agent/main/paper_scheduler_state.json"
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "Northstar-Paper-Trading-App"})
-        with urllib.request.urlopen(request, timeout=5) as response:
-            wrapper = json.loads(response.read().decode("utf-8"))
+        headers = {"User-Agent": "Northstar-Paper-Trading-App"}
+        if token:
+            headers.update({"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+            request = urllib.request.Request(api_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=5) as response:
+                api_data = json.loads(response.read().decode("utf-8"))
+            wrapper = json.loads(base64.b64decode(api_data["content"]).decode("utf-8"))
+        else:
+            request = urllib.request.Request(raw_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=5) as response:
+                wrapper = json.loads(response.read().decode("utf-8"))
         if isinstance(wrapper, dict) and wrapper.get("encrypted"):
             key = os.environ.get("TRADING_AGENT_ENCRYPTION_KEY", "").strip()
             if not key:
