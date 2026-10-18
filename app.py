@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from cryptography.fernet import Fernet
 
 st.set_page_config(page_title="Northstar | Paper Trading", page_icon="◈", layout="wide", initial_sidebar_state="collapsed")
 IST = ZoneInfo("Asia/Kolkata")
@@ -63,8 +64,11 @@ def buy_price_from_close(previous_close):
 def sync_plan_to_github(plan):
     """Mirror the saved plan to the repository for the scheduled runner."""
     token = os.environ.get("TRADING_AGENT_GITHUB_TOKEN", "").strip()
+    encryption_key = os.environ.get("TRADING_AGENT_ENCRYPTION_KEY", "").strip()
     if not token:
         return False, "Add the TRADING_AGENT_GITHUB_TOKEN Codespaces secret to enable background plan syncing."
+    if not encryption_key:
+        return False, "Add TRADING_AGENT_ENCRYPTION_KEY in Codespaces and GitHub Actions secrets to encrypt the shared plan."
     api_url = "https://api.github.com/repos/Servejit/Trading-Agent/contents/trade_plan.json"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Northstar-Paper-Trading-App"}
@@ -87,7 +91,8 @@ def sync_plan_to_github(plan):
             "buy_time": str(plan.get("buy_time", "09:00:00")) if plan else "09:00:00",
             "sell_time": str(plan.get("sell_time", "09:15:00")) if plan else "09:15:00",
         }
-        encoded = base64.b64encode((json.dumps(payload, indent=2) + "\n").encode("utf-8")).decode("ascii")
+        encrypted_payload = Fernet(encryption_key.encode("utf-8")).encrypt(json.dumps(payload).encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode((json.dumps({"encrypted": encrypted_payload}, indent=2) + "\n").encode("utf-8")).decode("ascii")
         body = {"message": "Sync saved paper-trade plan from Northstar app", "content": encoded}
         if sha:
             body["sha"] = sha
@@ -104,8 +109,14 @@ def load_remote_scheduler_state():
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "Northstar-Paper-Trading-App"})
         with urllib.request.urlopen(request, timeout=5) as response:
-            value = json.loads(response.read().decode("utf-8"))
-        return value if isinstance(value, dict) else {}
+            wrapper = json.loads(response.read().decode("utf-8"))
+        if isinstance(wrapper, dict) and wrapper.get("encrypted"):
+            key = os.environ.get("TRADING_AGENT_ENCRYPTION_KEY", "").strip()
+            if not key:
+                return {}
+            value = json.loads(Fernet(key.encode("utf-8")).decrypt(wrapper["encrypted"].encode("ascii")).decode("utf-8"))
+            return value if isinstance(value, dict) else {}
+        return wrapper if isinstance(wrapper, dict) else {}
     except Exception:
         return {}
 
