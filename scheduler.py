@@ -44,7 +44,13 @@ def current_quote(symbol):
         try:
             data = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
             if not data.empty and "Close" in data:
-                closes = pd.to_numeric(data["Close"], errors="coerce").dropna()
+                index = pd.to_datetime(data.index)
+                if index.tz is None:
+                    index = index.tz_localize(IST)
+                else:
+                    index = index.tz_convert(IST)
+                todays_rows = data.loc[index.date == datetime.now(IST).date()]
+                closes = pd.to_numeric(todays_rows["Close"], errors="coerce").dropna()
                 if not closes.empty and float(closes.iloc[-1]) > 0:
                     return float(closes.iloc[-1])
         except Exception:
